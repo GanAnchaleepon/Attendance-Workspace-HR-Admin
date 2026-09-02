@@ -10,7 +10,13 @@ declare(strict_types=1);
  *
  * ประเภทกะ (day/night) ของแต่ละ session พิจารณาจาก "เวลาเข้างานจริง" ว่าใกล้เวลาเริ่มกะเช้า
  * หรือกะดึกมากกว่ากัน (ระบบไม่ได้ยึดตามคอลัมน์ Shift ในไฟล์ Manpower เพราะ ShiftA/ShiftB
- * เป็นการหมุนเวียนรายสัปดาห์ที่ไม่มีตารางแน่นอนในระบบนี้)
+ * เป็นการหมุนเวียนที่ไม่มีตารางแน่นอนในระบบนี้ และอาจมีการสลับคนรายบุคคลได้ทุกเมื่อ)
+ *
+ * เมื่อวันไหนเดากะแบบวันเดียวไม่มั่นใจ (เวลาเข้างานก้ำกึ่งระหว่างกะเช้า/กะดึก หรือมีสแกนแค่ครั้งเดียว)
+ * ระบบจะดูรูปแบบการสแกนของวันใกล้เคียงมาโหวตเสียงข้างมากแทน (ดู resolveAmbiguousShifts)
+ * วิธีนี้อิงข้อมูลจริงล้วนๆ ไม่ต้องตั้งค่ารอบหมุนกะหรือรายชื่อยกเว้นในโค้ดอีกต่อไป
+ * ทั้งนี้ทุกหน้าที่แสดงกะ/OT (attendance_review.php, print_ot_form.php) ใช้ค่าที่คำนวณไว้ในตารางนี้
+ * โดยตรง ไม่มีการคำนวณกะซ้ำที่หน้าอื่นอีก (single source of truth)
  */
 final class AttendanceSessionBuilder
 {
@@ -50,6 +56,11 @@ final class AttendanceSessionBuilder
         foreach ($sessions as $session) {
             $computed[] = self::computeSession($session['check_in'], $session['check_out'], $session['scan_count'], $config);
         }
+        $computed = self::resolveAmbiguousShifts($computed, $config);
+        $computed = array_map(static function (array $s): array {
+            unset($s['ambiguous'], $s['check_in_dt'], $s['check_out_dt']);
+            return $s;
+        }, $computed);
 
         // ลบ session เก่าที่ไม่ตรงกับผลคำนวณใหม่ (เช่น จัดกลุ่มใหม่ทำให้วันที่/ประเภทกะเปลี่ยน)
         $newKeys = array_map(static fn ($s) => $s['work_date'] . '|' . $s['shift_type'], $computed);
@@ -140,9 +151,29 @@ final class AttendanceSessionBuilder
 
     /**
      * @return array{work_date:string, shift_type:string, expected_start:?string, expected_end:?string,
-     *   check_in:string, check_out:?string, scan_count:int, ot_flag:bool, ot_minutes:int, incomplete_flag:bool}
+     *   check_in:string, check_out:?string, scan_count:int, ot_flag:bool, ot_minutes:int, incomplete_flag:bool,
+     *   ambiguous:bool, check_in_dt: DateTimeImmutable, check_out_dt: DateTimeImmutable}
      */
     private static function computeSession(DateTimeImmutable $checkIn, DateTimeImmutable $checkOut, int $scanCount, array $config): array
+    {
+        [$shiftType, $ambiguous] = self::classifyShiftFromCheckIn($checkIn, $config);
+        $isIncomplete = $checkIn->getTimestamp() === $checkOut->getTimestamp();
+
+        $result = self::buildSessionForShiftType($checkIn, $checkOut, $scanCount, $shiftType, $isIncomplete, $config);
+        $result['ambiguous'] = $ambiguous || $isIncomplete;
+        $result['check_in_dt'] = $checkIn;
+        $result['check_out_dt'] = $checkOut;
+        return $result;
+    }
+
+    /**
+     * เดาประเภทกะจาก "เวลาเข้างานจริง" อย่างเดียว (ใกล้เวลาเริ่มกะเช้าหรือกะดึกมากกว่ากัน)
+     * ถือว่า "ก้ำกึ่ง" (ambiguous) เมื่อระยะห่างสองฝั่งต่างกันไม่ถึง 90 นาที เพื่อให้ resolveAmbiguousShifts
+     * ไปเทียบกับวันใกล้เคียงแทนการเดาแบบวันเดียวโดดๆ (กันเคสมาถึงตอนก้ำกึ่งกลางวัน-กลางคืนพอดี)
+     *
+     * @return array{0:string, 1:bool}
+     */
+    private static function classifyShiftFromCheckIn(DateTimeImmutable $checkIn, array $config): array
     {
         $dayStart = self::minutesOfDay($config['day_shift_start']);
         $nightStart = self::minutesOfDay($config['night_shift_start']);
@@ -152,6 +183,87 @@ final class AttendanceSessionBuilder
         $distNight = self::circularDistance($checkInMinutes, $nightStart);
 
         $shiftType = $distDay <= $distNight ? 'day' : 'night';
+        $ambiguous = abs($distDay - $distNight) <= 90;
+        return [$shiftType, $ambiguous];
+    }
+
+    /**
+     * เมื่อวันไหนเดากะแบบวันเดียวไม่มั่นใจ (ก้ำกึ่ง หรือมีสแกนแค่ครั้งเดียว) ให้ดูรูปแบบการสแกนจริง
+     * ของ "วันใกล้เคียง" ที่ไม่ก้ำกึ่ง (ใช้ 5 วันที่ใกล้ที่สุดตามปฏิทิน) มาโหวตเสียงข้างมากแทน
+     * วิธีนี้ปรับตามข้อมูลจริงเสมอ ไม่ต้องตั้งค่ารอบหมุนกะ/ยกเว้นรายบุคคลในโค้ดอีกต่อไป
+     * (พนักงานสลับกะฉุกเฉินเป็นรายวันก็จะถูกจับได้ถูกต้อง เพราะเวลาสแกนของวันนั้นเองจะฟ้องอยู่แล้ว
+     * ส่วนวันที่ข้อมูลก้ำกึ่ง/ไม่ครบ ค่อยอาศัยวันใกล้เคียงช่วยตัดสิน)
+     *
+     * @param array<int, array<string, mixed>> $sessions
+     * @return array<int, array<string, mixed>>
+     */
+    private static function resolveAmbiguousShifts(array $sessions, array $config): array
+    {
+        $workDateTs = array_map(
+            static fn (array $s): int => (int) strtotime((string) $s['work_date']),
+            $sessions
+        );
+
+        foreach ($sessions as $i => $session) {
+            if (!$session['ambiguous']) {
+                continue;
+            }
+
+            $candidates = [];
+            foreach ($sessions as $j => $other) {
+                if ($i === $j || $other['ambiguous']) {
+                    continue;
+                }
+                $dayDiff = abs($workDateTs[$j] - $workDateTs[$i]);
+                $candidates[] = [$dayDiff, (string) $other['shift_type']];
+            }
+
+            if (count($candidates) === 0) {
+                continue; // ไม่มีวันใกล้เคียงให้เทียบ ใช้ผลเดาแบบวันเดียวเดิมต่อไป
+            }
+
+            usort($candidates, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
+            $nearest = array_slice($candidates, 0, self::sanitizedNeighborCount(count($candidates)));
+
+            $votes = ['day' => 0, 'night' => 0];
+            foreach ($nearest as [, $type]) {
+                $votes[$type]++;
+            }
+            $majorityShift = $votes['day'] >= $votes['night'] ? 'day' : 'night';
+
+            if ($majorityShift !== $session['shift_type']) {
+                $rebuilt = self::buildSessionForShiftType(
+                    $session['check_in_dt'],
+                    $session['check_out_dt'],
+                    (int) $session['scan_count'],
+                    $majorityShift,
+                    (bool) $session['incomplete_flag'],
+                    $config
+                );
+                $sessions[$i] = $rebuilt + ['ambiguous' => $session['ambiguous'], 'check_in_dt' => $session['check_in_dt'], 'check_out_dt' => $session['check_out_dt']];
+            }
+        }
+
+        return $sessions;
+    }
+
+    private static function sanitizedNeighborCount(int $available): int
+    {
+        return min($available, 5);
+    }
+
+    /**
+     * @return array{work_date:string, shift_type:string, expected_start:?string, expected_end:?string,
+     *   check_in:string, check_out:?string, scan_count:int, ot_flag:bool, ot_minutes:int, incomplete_flag:bool}
+     */
+    private static function buildSessionForShiftType(
+        DateTimeImmutable $checkIn,
+        DateTimeImmutable $checkOut,
+        int $scanCount,
+        string $shiftType,
+        bool $isIncomplete,
+        array $config
+    ): array {
         $workDate = $checkIn->format('Y-m-d');
 
         if ($shiftType === 'day') {
@@ -163,8 +275,6 @@ final class AttendanceSessionBuilder
                 ->modify('+1 day')
                 ->setTime((int) explode(':', $config['night_shift_end'])[0], (int) explode(':', $config['night_shift_end'])[1]);
         }
-
-        $isIncomplete = $checkIn->getTimestamp() === $checkOut->getTimestamp();
 
         $otFlag = false;
         $otMinutes = 0;

@@ -21,6 +21,20 @@ $search = trim((string) ($_GET['q'] ?? ''));
 $monthStart = $month . '-01';
 $monthEnd = date('Y-m-t', strtotime($monthStart));
 
+$recomputeMessage = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'recompute_sessions') {
+    Csrf::requireValid();
+
+    // ใช้ตอนอัปเดต logic คำนวณกะ/OT ใหม่ (เช่น src/AttendanceSessionBuilder.php) แล้วต้องการให้
+    // ข้อมูลที่นำเข้าไว้แล้วในอดีตถูกคำนวณใหม่ตาม logic ล่าสุดด้วย โดยไม่ต้องอัปโหลดไฟล์สแกนซ้ำ
+    $codesStmt = $pdo->prepare('SELECT DISTINCT employee_code FROM attendance_scans WHERE project_code = :project');
+    $codesStmt->execute(['project' => $projectCode]);
+    $employeeCodes = array_column($codesStmt->fetchAll(), 'employee_code');
+
+    $sessionCount = AttendanceSessionBuilder::rebuildForEmployees($employeeCodes, $projectCode);
+    $recomputeMessage = "คำนวณกะ/OT ใหม่ให้พนักงาน " . count($employeeCodes) . " คน ({$sessionCount} กะ) เรียบร้อยแล้ว";
+}
+
 $hasSortOrderStmt = $pdo->query("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME = 'employees'
@@ -86,6 +100,9 @@ $monthLabel = $thaiMonths[(int) date('n', $monthTs)] . ' ' . (date('Y', $monthTs
 $pageTitle = 'ตรวจสอบ OT';
 require __DIR__ . '/partials/header.php';
 ?>
+<?php if ($recomputeMessage !== null): ?>
+    <div class="alert alert-success"><?= h($recomputeMessage) ?></div>
+<?php endif; ?>
 <div class="card review-hero-card">
     <div class="review-hero">
         <div>
@@ -96,6 +113,13 @@ require __DIR__ . '/partials/header.php';
                 เพื่อดูตารางเวลาเข้า-ออกงานรายวันของคนนั้นแบบเดียวกับใบแจ้ง OT กระดาษ ทั้งเดือน
                 วันไหนไม่มีข้อมูลสแกนนิ้วจะระบุว่า "ไม่พบการสแกนนิ้ว" ไม่เอาไปรวมกับคนอื่น
             </p>
+            <form method="post" style="margin-top:8px;" onsubmit="return confirm('คำนวณกะ/OT ใหม่ทั้งหมดของโปรเจคนี้จากข้อมูลสแกนที่มีอยู่? ใช้เวลาสักครู่');">
+                <?= Csrf::field() ?>
+                <input type="hidden" name="action" value="recompute_sessions">
+                <input type="hidden" name="project" value="<?= h($projectCode) ?>">
+                <input type="hidden" name="month" value="<?= h($month) ?>">
+                <button type="submit" class="btn btn-secondary">คำนวณกะ/OT ใหม่ทั้งหมด (โปรเจคนี้)</button>
+            </form>
         </div>
         <div class="review-hero-meta">
             <div class="review-hero-month">ประจำเดือน <?= h($monthLabel) ?></div>
