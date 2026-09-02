@@ -18,7 +18,26 @@ final class ManpowerImporter
     public static function import(string $filePath, string $originalFilename, string $projectCode, string $listType, ?int $userId): array
     {
         $table = CsvTable::fromFile($filePath, self::HEADER_HINTS);
+        return self::importFromTable($table, $originalFilename, $projectCode, $listType, $userId);
+    }
 
+    /**
+     * นำเข้าจากแถวข้อมูลที่แปลงมาแล้ว (เช่นชีตหนึ่งของไฟล์ .xlsx ที่มีหลายชีต) แทนการอ่านไฟล์ CSV โดยตรง
+     *
+     * @param array<int, array<int, string>> $rows
+     * @return array{changed: bool, message: string, employee_count: int, skipped_rows: int}
+     */
+    public static function importFromRows(array $rows, string $originalFilename, string $projectCode, string $listType, ?int $userId): array
+    {
+        $table = CsvTable::fromRows($rows, self::HEADER_HINTS);
+        return self::importFromTable($table, $originalFilename, $projectCode, $listType, $userId);
+    }
+
+    /**
+     * @return array{changed: bool, message: string, employee_count: int, skipped_rows: int}
+     */
+    private static function importFromTable(CsvTable $table, string $originalFilename, string $projectCode, string $listType, ?int $userId): array
+    {
         // resolve ทีละ field แล้วกันคอลัมน์ที่ถูกใช้ไปแล้วไม่ให้ field อื่นจับซ้ำ
         // (บางไฟล์ เช่น Manpower QA คอลัมน์ "นามสกุลไทย" และ "นามสกุลอังกฤษ" มีหัวตารางย่อยเป็นคำว่า "Lastname" เหมือนกัน)
         $used = [];

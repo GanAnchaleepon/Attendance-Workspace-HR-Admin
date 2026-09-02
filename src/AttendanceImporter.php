@@ -20,7 +20,14 @@ final class AttendanceImporter
      */
     public static function import(string $filePath, string $originalFilename, string $projectCode): array
     {
-        $table = CsvTable::fromFile($filePath, self::HEADER_HINTS);
+        $extension = strtolower((string) pathinfo($originalFilename, PATHINFO_EXTENSION));
+        if ($extension === 'xlsx') {
+            $table = CsvTable::fromRows(XlsxReader::readRows($filePath), self::HEADER_HINTS);
+        } elseif ($extension === 'xls') {
+            $table = CsvTable::fromRows(XlsReader::readRows($filePath), self::HEADER_HINTS);
+        } else {
+            $table = CsvTable::fromFile($filePath, self::HEADER_HINTS);
+        }
 
         $colDept = $table->findColumn(['แผนก', 'department']);
         $colName = $table->findColumn(['ชื่อ']);
@@ -253,9 +260,12 @@ final class AttendanceImporter
 
     private static function parseDateTime(string $raw): ?DateTimeImmutable
     {
+        $raw = trim($raw);
+
+        // ค่าจากไฟล์ .xlsx ที่เป็น Excel date serial (ตัวเลข) จะถูก XlsxReader แปลงเป็นรูปแบบนี้ไว้ล่วงหน้าแล้ว
         // แยกด้วย regex เอง (ไม่พึ่ง createFromFormat) เพื่อรองรับทั้งกรณีมี/ไม่มีเลข 0 นำหน้า
         // เช่น "1/7/2026 7:24:00" หรือ "01/07/2026 07:24" ก็ต้องอ่านได้ถูกต้องเหมือนกัน
-        if (!preg_match('/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/', trim($raw), $m)) {
+        if (!preg_match('/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/', $raw, $m)) {
             return null;
         }
 

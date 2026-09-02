@@ -120,6 +120,8 @@ require_once __DIR__ . '/Database.php';
 require_once __DIR__ . '/Auth.php';
 require_once __DIR__ . '/Csrf.php';
 require_once __DIR__ . '/CsvTable.php';
+require_once __DIR__ . '/XlsxReader.php';
+require_once __DIR__ . '/XlsReader.php';
 require_once __DIR__ . '/ManpowerImporter.php';
 require_once __DIR__ . '/AttendanceImporter.php';
 require_once __DIR__ . '/AttendanceSessionBuilder.php';

@@ -52,58 +52,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!in_array($projectCode, $validProjects, true)) {
         $errors[] = 'กรุณาเลือกโปรเจคให้ถูกต้อง';
     } else {
-        $uploads = [
-            'manpower_file' => 'manpower',
-            'qa_file' => 'qa',
-        ];
-
         $anyFileProvided = false;
 
-        foreach ($uploads as $fieldName => $listType) {
-            $file = $_FILES[$fieldName] ?? null;
-            if (!$file || $file['error'] === UPLOAD_ERR_NO_FILE) {
-                continue;
-            }
-
+        // ไฟล์รวม .xlsx เดียวที่มี 2 ชีต (Manpower หลัก + Manpower QA) ระบบจะแยกชีตให้เองตามชื่อชีต
+        $combinedFile = $_FILES['combined_file'] ?? null;
+        if ($combinedFile && $combinedFile['error'] !== UPLOAD_ERR_NO_FILE) {
             $anyFileProvided = true;
 
-            if ($file['error'] !== UPLOAD_ERR_OK) {
-                $errors[] = "อัปโหลดไฟล์ {$fieldName} ไม่สำเร็จ (รหัสข้อผิดพลาด {$file['error']})";
-                continue;
-            }
-
-            if ($file['size'] > MAX_UPLOAD_BYTES) {
-                $errors[] = "ไฟล์ {$file['name']} มีขนาดใหญ่เกิน 10MB";
-                continue;
-            }
-
-            $extension = strtolower((string) pathinfo($file['name'], PATHINFO_EXTENSION));
-            if ($extension !== 'csv') {
-                $errors[] = "ไฟล์ {$file['name']} ต้องเป็นไฟล์ .csv เท่านั้น";
-                continue;
-            }
-
-            if (!is_uploaded_file($file['tmp_name'])) {
+            if ($combinedFile['error'] !== UPLOAD_ERR_OK) {
+                $errors[] = "อัปโหลดไฟล์ {$combinedFile['name']} ไม่สำเร็จ (รหัสข้อผิดพลาด {$combinedFile['error']})";
+            } elseif ($combinedFile['size'] > MAX_UPLOAD_BYTES) {
+                $errors[] = "ไฟล์ {$combinedFile['name']} มีขนาดใหญ่เกิน 10MB";
+            } elseif (strtolower((string) pathinfo($combinedFile['name'], PATHINFO_EXTENSION)) !== 'xlsx') {
+                $errors[] = "ไฟล์รวม Manpower + QA ต้องเป็น .xlsx เท่านั้น";
+            } elseif (!is_uploaded_file($combinedFile['tmp_name'])) {
                 $errors[] = 'เกิดข้อผิดพลาดด้านความปลอดภัยของไฟล์ที่อัปโหลด';
-                continue;
-            }
+            } else {
+                try {
+                    $sheetNames = XlsxReader::listSheetNames($combinedFile['tmp_name']);
+                    if (count($sheetNames) === 0) {
+                        $errors[] = "ไม่พบชีตในไฟล์ {$combinedFile['name']}";
+                    } else {
+                        // ชีตที่ชื่อมีคำว่า "qa" ถือเป็น Manpower QA ส่วนชีตอื่นที่เหลือถือเป็น Manpower หลัก
+                        // (ถ้าไม่มีชีตไหนชื่อมีคำว่า qa เลย จะยึดตามลำดับ: ชีต 1 = Manpower, ชีต 2 = QA)
+                        $qaIndex = null;
+                        foreach ($sheetNames as $idx => $name) {
+                            if (stripos($name, 'qa') !== false) {
+                                $qaIndex = $idx;
+                                break;
+                            }
+                        }
 
-            try {
-                $result = ManpowerImporter::import(
-                    $file['tmp_name'],
-                    $file['name'],
-                    $projectCode,
-                    $listType,
-                    Auth::currentUserId()
-                );
-                $results[] = ['list_type' => $listType, 'file_name' => $file['name']] + $result;
-            } catch (Throwable $e) {
-                $errors[] = "ประมวลผลไฟล์ {$file['name']} ไม่สำเร็จ: " . $e->getMessage();
+                        $sheetAssignments = [];
+                        if ($qaIndex !== null) {
+                            $sheetAssignments['qa'] = $qaIndex;
+                            foreach ($sheetNames as $idx => $name) {
+                                if ($idx !== $qaIndex) {
+                                    $sheetAssignments['manpower'] = $idx;
+                                    break;
+                                }
+                            }
+                        } else {
+                            $sheetAssignments['manpower'] = 0;
+                            if (isset($sheetNames[1])) {
+                                $sheetAssignments['qa'] = 1;
+                            }
+                        }
+
+                        foreach ($sheetAssignments as $listType => $idx) {
+                            $sourceLabel = "{$combinedFile['name']} (ชีต: {$sheetNames[$idx]})";
+                            try {
+                                $rows = XlsxReader::readRows($combinedFile['tmp_name'], $idx);
+                                $result = ManpowerImporter::importFromRows(
+                                    $rows,
+                                    $sourceLabel,
+                                    $projectCode,
+                                    $listType,
+                                    Auth::currentUserId()
+                                );
+                                $results[] = ['list_type' => $listType, 'file_name' => $sourceLabel] + $result;
+                            } catch (Throwable $e) {
+                                $errors[] = "ประมวลผลชีต {$sheetNames[$idx]} ไม่สำเร็จ: " . $e->getMessage();
+                            }
+                        }
+                    }
+                } catch (Throwable $e) {
+                    $errors[] = "อ่านไฟล์ {$combinedFile['name']} ไม่สำเร็จ: " . $e->getMessage();
+                }
             }
         }
 
         if (!$anyFileProvided) {
-            $errors[] = 'กรุณาเลือกไฟล์อย่างน้อย 1 ไฟล์ (Manpower หรือ Manpower QA)';
+            $errors[] = 'กรุณาเลือกไฟล์ Manpower รวม (.xlsx)';
         }
     }
 }
@@ -252,7 +272,7 @@ require __DIR__ . '/partials/header.php';
 <?php if ($allowedProjectCode !== null): ?>
     <p class="hint">บัญชีนี้ถูกจำกัดสิทธิ์ให้จัดการเฉพาะโปรเจค <strong><?= h($allowedProjectCode === 'FTM-SE' ? 'TTV FTM-SE' : 'TTV AAT-SE') ?></strong></p>
 <?php endif; ?>
-<p class="hint">อัปโหลดไฟล์ Manpower หลัก และ/หรือ Manpower QA ของโปรเจคที่เลือก
+<p class="hint">อัปโหลดไฟล์ Manpower รวม (.xlsx) ที่มีชีต Manpower หลัก และ Manpower QA อยู่ในไฟล์เดียวกัน
 ระบบจะเทียบกับข้อมูลครั้งล่าสุด หากรายชื่อไม่เปลี่ยนแปลงจะไม่แก้ไขฐานข้อมูล
 แต่หากมีการเปลี่ยนแปลง ระบบจะแทนที่รายชื่อเดิมทั้งหมดด้วยไฟล์ใหม่ (คนที่ออกแล้วจะถูกลบออกอัตโนมัติ)</p>
 
@@ -288,13 +308,11 @@ require __DIR__ . '/partials/header.php';
             </select>
         <?php endif; ?>
 
-        <label for="manpower_file">ไฟล์ Manpower หลัก (.csv)</label>
-        <input type="file" id="manpower_file" name="manpower_file" accept=".csv">
+        <label for="combined_file">ไฟล์ Manpower รวม (.xlsx ที่มีชีต Manpower + Manpower QA ในไฟล์เดียวกัน)</label>
+        <input type="file" id="combined_file" name="combined_file"
+               accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
+        <p class="hint">ระบบจะแยกชีตให้เองจากชื่อชีต (ชีตที่ชื่อมีคำว่า "QA" จะนำเข้าเป็น Manpower QA ส่วนชีตอื่นเป็น Manpower หลัก ถ้าไม่มีชื่อชีตคำว่า QA จะใช้ชีตที่ 1 เป็น Manpower และชีตที่ 2 เป็น QA)</p>
 
-        <label for="qa_file">ไฟล์ Manpower QA (.csv)</label>
-        <input type="file" id="qa_file" name="qa_file" accept=".csv">
-
-        <p class="hint">สามารถอัปโหลดไฟล์เดียว หรือทั้งสองไฟล์พร้อมกันก็ได้</p>
         <p class="hint">หากเจอ 403 Forbidden ให้เลี่ยงชื่อไฟล์ที่มีอักขระพิเศษ เช่น ' ( ) [ ] หรือช่องว่างหลายตัว ระบบหน้านี้จะแปลงชื่อไฟล์ให้อัตโนมัติก่อนส่ง</p>
 
         <button type="submit">อัปโหลดและประมวลผล</button>
@@ -466,7 +484,7 @@ require __DIR__ . '/partials/header.php';
         event.preventDefault();
 
         const formData = new FormData(form);
-        const fileInputNames = ['manpower_file', 'qa_file'];
+        const fileInputNames = ['combined_file'];
 
         for (const inputName of fileInputNames) {
             const input = form.querySelector(`input[name="${inputName}"]`);

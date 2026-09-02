@@ -45,6 +45,20 @@ final class CsvTable
             $rows[] = array_map(static fn ($v) => trim((string) $v), $parsed);
         }
 
+        return self::fromRows($rows, $headerHints);
+    }
+
+    /**
+     * สร้างตารางจากแถวข้อมูลที่แปลงมาแล้ว (เช่นจาก XlsxReader) แทนการอ่านไฟล์ CSV โดยตรง
+     *
+     * @param array<int, array<int, string>> $rows
+     */
+    public static function fromRows(array $rows, array $headerHints): self
+    {
+        $rows = array_values(array_filter($rows, static function (array $row): bool {
+            return count(array_filter($row, static fn ($v) => trim((string) $v) !== '')) > 0;
+        }));
+
         if (count($rows) === 0) {
             throw new RuntimeException('ไฟล์ว่างเปล่าหรืออ่านไม่ได้');
         }

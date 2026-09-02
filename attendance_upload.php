@@ -33,8 +33,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = "อัปโหลดไฟล์ไม่สำเร็จ (รหัสข้อผิดพลาด {$file['error']})";
     } elseif ($file['size'] > ATT_MAX_UPLOAD_BYTES) {
         $errors[] = 'ไฟล์มีขนาดใหญ่เกิน 60MB';
-    } elseif (strtolower((string) pathinfo($file['name'], PATHINFO_EXTENSION)) !== 'csv') {
-        $errors[] = 'ไฟล์ต้องเป็น .csv เท่านั้น';
+    } elseif (!in_array(strtolower((string) pathinfo($file['name'], PATHINFO_EXTENSION)), ['csv', 'xlsx', 'xls'], true)) {
+        $errors[] = 'ไฟล์ต้องเป็น .csv, .xlsx หรือ .xls เท่านั้น';
     } elseif (!is_uploaded_file($file['tmp_name'])) {
         $errors[] = 'เกิดข้อผิดพลาดด้านความปลอดภัยของไฟล์ที่อัปโหลด';
     }
@@ -201,8 +201,10 @@ require __DIR__ . '/partials/header.php';
             <option value="AAT-SE">TTV AAT-SE</option>
         </select>
 
-        <label for="attendance_file">ไฟล์สแกนนิ้วมือ (.csv)</label>
-        <input type="file" id="attendance_file" name="attendance_file" accept=".csv" required>
+        <label for="attendance_file">ไฟล์สแกนนิ้วมือ (.csv, .xlsx หรือ .xls)</label>
+        <input type="file" id="attendance_file" name="attendance_file"
+               accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+               required>
 
         <button type="submit" id="attendance-upload-submit">อัปโหลดและประมวลผล</button>
     </form>
