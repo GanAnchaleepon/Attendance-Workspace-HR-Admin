@@ -11,6 +11,9 @@ final class ShiftSchedule
 {
     public const SHIFTS = ['A', 'B'];
 
+    /** @var array<string, array{first_week_day_shift: string}|null> cache ต่อ request กัน query ซ้ำ (ถูกเรียกทีละแถวสแกน) */
+    private static array $settingCache = [];
+
     /**
      * แปลงค่า shift_code จากไฟล์ Manpower ให้เหลือแค่ 'A' หรือ 'B' (คืน null ถ้าอ่านไม่ออก)
      */
@@ -57,12 +60,20 @@ final class ShiftSchedule
      */
     public static function getSetting(string $projectCode, string $month): ?array
     {
+        $cacheKey = $projectCode . '|' . $month;
+        if (array_key_exists($cacheKey, self::$settingCache)) {
+            return self::$settingCache[$cacheKey];
+        }
+
         $stmt = Database::pdo()->prepare(
             'SELECT first_week_day_shift FROM shift_month_settings WHERE project_code = :p AND month = :m LIMIT 1'
         );
         $stmt->execute(['p' => $projectCode, 'm' => $month]);
         $row = $stmt->fetch();
-        return $row === false ? null : ['first_week_day_shift' => (string) $row['first_week_day_shift']];
+        $result = $row === false ? null : ['first_week_day_shift' => (string) $row['first_week_day_shift']];
+
+        self::$settingCache[$cacheKey] = $result;
+        return $result;
     }
 
     /**
@@ -93,6 +104,8 @@ final class ShiftSchedule
              VALUES (:p, :m, :s, :u)
              ON DUPLICATE KEY UPDATE first_week_day_shift = VALUES(first_week_day_shift), updated_by = VALUES(updated_by)'
         )->execute(['p' => $projectCode, 'm' => $month, 's' => $firstWeekDayShift, 'u' => $userId]);
+
+        unset(self::$settingCache[$projectCode . '|' . $month]);
     }
 
     /**

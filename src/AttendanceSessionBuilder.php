@@ -58,15 +58,22 @@ final class AttendanceSessionBuilder
             $stmt->fetchAll()
         );
 
-        $sessions = self::groupIntoSessions($scanTimes, (float) $config['max_session_span_hours']);
+        $sessions = self::groupScans($scanTimes, $projectCode, $employeeShiftLabel, $config);
 
         $computed = [];
         foreach ($sessions as $session) {
-            $computed[] = self::computeSession($session['check_in'], $session['check_out'], $session['scan_count'], $config);
+            $computed[] = self::computeSession(
+                $session['check_in'],
+                $session['check_out'],
+                $session['scan_count'],
+                $config,
+                $session['forced_shift'],
+                $session['work_date']
+            );
         }
         $computed = self::resolveAmbiguousShifts($computed, $config, $projectCode, $employeeShiftLabel);
         $computed = array_map(static function (array $s): array {
-            unset($s['ambiguous'], $s['check_in_dt'], $s['check_out_dt']);
+            unset($s['ambiguous'], $s['check_in_dt'], $s['check_out_dt'], $s['work_date_override']);
             return $s;
         }, $computed);
 
@@ -120,6 +127,131 @@ final class AttendanceSessionBuilder
     }
 
     /**
+     * จับกลุ่มสแกนเป็นกะ
+     *
+     * ถ้ารู้กะที่พนักงานควรเข้าในแต่ละวัน (มี shift_code A/B + HR ตั้งตารางกะประจำเดือนไว้)
+     * จะจับสแกนเข้า "ช่องกะ" ตามกรอบเวลาจริงของกะวันนั้น ๆ ซึ่งแม่นกว่ามาก
+     * เพราะวิธีหน้าต่างเลื่อน (max_session_span_hours) จะพังทันทีที่วันไหนขาดสแกนไปหนึ่งครั้ง
+     * โดยจะดูดสแกนของวันถัดไปเข้ามารวมเป็นกะเดียวกัน แล้วเลื่อนผิดต่อกันเป็นทอด ๆ ทั้งสัปดาห์
+     *
+     * @param DateTimeImmutable[] $scanTimes
+     * @return array<int, array{check_in: DateTimeImmutable, check_out: DateTimeImmutable, scan_count: int, forced_shift: ?string, work_date: ?string}>
+     */
+    private static function groupScans(array $scanTimes, string $projectCode, ?string $employeeShiftLabel, array $config): array
+    {
+        if ($employeeShiftLabel === null) {
+            return array_map(
+                static fn (array $s): array => $s + ['forced_shift' => null, 'work_date' => null],
+                self::groupIntoSessions($scanTimes, (float) $config['max_session_span_hours'])
+            );
+        }
+
+        $slots = [];
+        $leftover = [];
+        $currentKey = null;
+
+        foreach ($scanTimes as $time) {
+            $candidates = self::scheduledSlotCandidates($time, $projectCode, $employeeShiftLabel, $config);
+            if (count($candidates) === 0) {
+                $leftover[] = $time;
+                $currentKey = null;
+                continue;
+            }
+
+            $chosen = null;
+            foreach ($candidates as $candidate) {
+                if ($candidate['key'] === $currentKey) {
+                    $chosen = $candidate;
+                    break;
+                }
+            }
+            if ($chosen === null) {
+                // เปิดช่องกะใหม่: เลือกกะที่เวลาเริ่มงานใกล้กับเวลาสแกนนี้ที่สุด
+                $scanTs = $time->getTimestamp();
+                usort(
+                    $candidates,
+                    static fn (array $a, array $b): int => abs($a['expected_start'] - $scanTs) <=> abs($b['expected_start'] - $scanTs)
+                );
+                $chosen = $candidates[0];
+            }
+
+            $key = $chosen['key'];
+            if (!isset($slots[$key])) {
+                $slots[$key] = ['date' => $chosen['date'], 'shift' => $chosen['shift'], 'times' => []];
+            }
+            $slots[$key]['times'][] = $time;
+            $currentKey = $key;
+        }
+
+        $result = [];
+        foreach ($slots as $slot) {
+            $times = $slot['times'];
+            $result[] = [
+                'check_in' => $times[0],
+                'check_out' => $times[count($times) - 1],
+                'scan_count' => count($times),
+                'forced_shift' => $slot['shift'],
+                'work_date' => $slot['date'],
+            ];
+        }
+        foreach (self::groupIntoSessions($leftover, (float) $config['max_session_span_hours']) as $session) {
+            $result[] = $session + ['forced_shift' => null, 'work_date' => null];
+        }
+
+        usort($result, static fn (array $a, array $b): int => $a['check_in'] <=> $b['check_in']);
+        return $result;
+    }
+
+    /**
+     * หา "ช่องกะ" ที่เวลาสแกนนี้เข้าข่าย โดยดูกะของวันนั้นและวันก่อนหน้า (กะดึกคาบเกี่ยวข้ามคืน)
+     * กรอบของแต่ละกะ = เวลาเข้างาน -5 ชม. ถึง เวลาเลิกงาน +6 ชม. (เผื่อมาก่อน/อยู่ OT ต่อ)
+     *
+     * @return array<int, array{key:string, date:string, shift:string, expected_start:int, expected_end:int}>
+     */
+    private static function scheduledSlotCandidates(DateTimeImmutable $time, string $projectCode, string $employeeShiftLabel, array $config): array
+    {
+        $scanTs = $time->getTimestamp();
+        $candidates = [];
+
+        foreach (['-1 day', '+0 day'] as $offset) {
+            $date = $time->modify($offset)->format('Y-m-d');
+            $shift = ShiftSchedule::resolveShiftType($projectCode, $date, $employeeShiftLabel);
+            if ($shift === null) {
+                continue;
+            }
+
+            [$expectedStart, $expectedEnd] = self::expectedBounds($date, $shift, $config);
+            if ($scanTs >= $expectedStart - 5 * 3600 && $scanTs <= $expectedEnd + 6 * 3600) {
+                $candidates[] = [
+                    'key' => $date . '|' . $shift,
+                    'date' => $date,
+                    'shift' => $shift,
+                    'expected_start' => $expectedStart,
+                    'expected_end' => $expectedEnd,
+                ];
+            }
+        }
+
+        return $candidates;
+    }
+
+    /** @return array{0:int, 1:int} timestamp ของเวลาเข้างาน/เลิกงานตามกะของวันที่ระบุ */
+    private static function expectedBounds(string $date, string $shiftType, array $config): array
+    {
+        $base = new DateTimeImmutable($date . ' 00:00:00');
+
+        if ($shiftType === 'day') {
+            $start = $base->setTime((int) explode(':', $config['day_shift_start'])[0], (int) explode(':', $config['day_shift_start'])[1]);
+            $end = $base->setTime((int) explode(':', $config['day_shift_end'])[0], (int) explode(':', $config['day_shift_end'])[1]);
+        } else {
+            $start = $base->setTime((int) explode(':', $config['night_shift_start'])[0], (int) explode(':', $config['night_shift_start'])[1]);
+            $end = $base->modify('+1 day')->setTime((int) explode(':', $config['night_shift_end'])[0], (int) explode(':', $config['night_shift_end'])[1]);
+        }
+
+        return [$start->getTimestamp(), $end->getTimestamp()];
+    }
+
+    /**
      * @param DateTimeImmutable[] $scanTimes
      * @return array<int, array{check_in: DateTimeImmutable, check_out: DateTimeImmutable, scan_count: int}>
      */
@@ -162,15 +294,28 @@ final class AttendanceSessionBuilder
      *   check_in:string, check_out:?string, scan_count:int, ot_flag:bool, ot_minutes:int, incomplete_flag:bool,
      *   ambiguous:bool, check_in_dt: DateTimeImmutable, check_out_dt: DateTimeImmutable}
      */
-    private static function computeSession(DateTimeImmutable $checkIn, DateTimeImmutable $checkOut, int $scanCount, array $config): array
-    {
-        [$shiftType, $ambiguous] = self::classifyShiftFromCheckIn($checkIn, $config);
+    private static function computeSession(
+        DateTimeImmutable $checkIn,
+        DateTimeImmutable $checkOut,
+        int $scanCount,
+        array $config,
+        ?string $forcedShiftType = null,
+        ?string $workDateOverride = null
+    ): array {
+        if ($forcedShiftType !== null) {
+            $shiftType = $forcedShiftType;
+            $ambiguous = false; // มาจากตารางกะที่ตั้งไว้ ไม่ต้องเดาซ้ำ
+        } else {
+            [$shiftType, $ambiguous] = self::classifyShiftFromCheckIn($checkIn, $config);
+        }
+
         $isIncomplete = $checkIn->getTimestamp() === $checkOut->getTimestamp();
 
-        $result = self::buildSessionForShiftType($checkIn, $checkOut, $scanCount, $shiftType, $isIncomplete, $config);
-        $result['ambiguous'] = $ambiguous || $isIncomplete;
+        $result = self::buildSessionForShiftType($checkIn, $checkOut, $scanCount, $shiftType, $isIncomplete, $config, $workDateOverride);
+        $result['ambiguous'] = $ambiguous || ($forcedShiftType === null && $isIncomplete);
         $result['check_in_dt'] = $checkIn;
         $result['check_out_dt'] = $checkOut;
+        $result['work_date_override'] = $workDateOverride;
         return $result;
     }
 
@@ -254,9 +399,15 @@ final class AttendanceSessionBuilder
                     (int) $session['scan_count'],
                     $resolvedShift,
                     (bool) $session['incomplete_flag'],
-                    $config
+                    $config,
+                    $session['work_date_override'] ?? null
                 );
-                $sessions[$i] = $rebuilt + ['ambiguous' => $session['ambiguous'], 'check_in_dt' => $session['check_in_dt'], 'check_out_dt' => $session['check_out_dt']];
+                $sessions[$i] = $rebuilt + [
+                    'ambiguous' => $session['ambiguous'],
+                    'check_in_dt' => $session['check_in_dt'],
+                    'check_out_dt' => $session['check_out_dt'],
+                    'work_date_override' => $session['work_date_override'] ?? null,
+                ];
             }
         }
 
@@ -278,16 +429,22 @@ final class AttendanceSessionBuilder
         int $scanCount,
         string $shiftType,
         bool $isIncomplete,
-        array $config
+        array $config,
+        ?string $workDateOverride = null
     ): array {
-        $workDate = $checkIn->format('Y-m-d');
+        // ถ้ารู้วันที่ของกะจากตารางกะ ให้ยึดวันนั้นเป็นหลัก ไม่ใช่วันของสแกนแรก
+        // (กรณีขาดสแกนเข้า เหลือแต่สแกนออกตอนเช้าวันถัดไป วันที่ของกะยังต้องเป็นวันที่เริ่มกะ)
+        $anchor = $workDateOverride !== null
+            ? new DateTimeImmutable($workDateOverride . ' 00:00:00')
+            : $checkIn;
+        $workDate = $anchor->format('Y-m-d');
 
         if ($shiftType === 'day') {
-            $expectedStart = $checkIn->setTime((int) explode(':', $config['day_shift_start'])[0], (int) explode(':', $config['day_shift_start'])[1]);
-            $expectedEnd = $checkIn->setTime((int) explode(':', $config['day_shift_end'])[0], (int) explode(':', $config['day_shift_end'])[1]);
+            $expectedStart = $anchor->setTime((int) explode(':', $config['day_shift_start'])[0], (int) explode(':', $config['day_shift_start'])[1]);
+            $expectedEnd = $anchor->setTime((int) explode(':', $config['day_shift_end'])[0], (int) explode(':', $config['day_shift_end'])[1]);
         } else {
-            $expectedStart = $checkIn->setTime((int) explode(':', $config['night_shift_start'])[0], (int) explode(':', $config['night_shift_start'])[1]);
-            $expectedEnd = $checkIn
+            $expectedStart = $anchor->setTime((int) explode(':', $config['night_shift_start'])[0], (int) explode(':', $config['night_shift_start'])[1]);
+            $expectedEnd = $anchor
                 ->modify('+1 day')
                 ->setTime((int) explode(':', $config['night_shift_end'])[0], (int) explode(':', $config['night_shift_end'])[1]);
         }
