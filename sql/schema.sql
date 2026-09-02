@@ -140,3 +140,23 @@ CREATE TABLE IF NOT EXISTS attendance_sessions (
     CONSTRAINT fk_session_reviewer FOREIGN KEY (reviewed_by) REFERENCES users(id)
         ON UPDATE CASCADE ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ----------------------------------------------------------------------------
+-- HR ระบุเองว่ากะ A/B ไหนเข้าเช้าในสัปดาห์แรกของแต่ละเดือน (ปฏิทินสัปดาห์ จันทร์-อาทิตย์)
+-- สัปดาห์ถัดไปในเดือนเดียวกันสลับ A/B ให้อัตโนมัติ ใช้แทนการเดาจากข้อมูลสแกนเมื่อมีการตั้งค่าไว้
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS shift_month_settings (
+    id                    INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    project_code          VARCHAR(20) NOT NULL,
+    month                 CHAR(7) NOT NULL,
+    first_week_day_shift  ENUM('A','B') NOT NULL,
+    updated_by            INT UNSIGNED NULL,
+    created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uniq_project_month (project_code, month),
+    CONSTRAINT fk_shift_setting_project FOREIGN KEY (project_code) REFERENCES projects(code)
+        ON UPDATE CASCADE ON DELETE CASCADE,
+    CONSTRAINT fk_shift_setting_user FOREIGN KEY (updated_by) REFERENCES users(id)
+        ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

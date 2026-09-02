@@ -14,7 +14,8 @@ declare(strict_types=1);
  *
  * เมื่อวันไหนเดากะแบบวันเดียวไม่มั่นใจ (เวลาเข้างานก้ำกึ่งระหว่างกะเช้า/กะดึก หรือมีสแกนแค่ครั้งเดียว)
  * ระบบจะดูรูปแบบการสแกนของวันใกล้เคียงมาโหวตเสียงข้างมากแทน (ดู resolveAmbiguousShifts)
- * วิธีนี้อิงข้อมูลจริงล้วนๆ ไม่ต้องตั้งค่ารอบหมุนกะหรือรายชื่อยกเว้นในโค้ดอีกต่อไป
+ * แต่ถ้า HR ตั้งค่ากะประจำเดือนไว้ผ่านหน้า attendance_review.php (ดู src/ShiftSchedule.php) จะยึดตามนั้น
+ * เสมอโดยไม่เดา (authoritative) เพราะกะของพนักงานแต่ละคนที่ประกาศมาแล้วถือเป็นค่าตายตัว
  * ทั้งนี้ทุกหน้าที่แสดงกะ/OT (attendance_review.php, print_ot_form.php) ใช้ค่าที่คำนวณไว้ในตารางนี้
  * โดยตรง ไม่มีการคำนวณกะซ้ำที่หน้าอื่นอีก (single source of truth)
  */
@@ -39,6 +40,12 @@ final class AttendanceSessionBuilder
         $pdo = Database::pdo();
         $config = App::config('attendance');
 
+        $shiftCodeStmt = $pdo->prepare(
+            'SELECT shift_code FROM employees WHERE employee_code = :code AND project_code = :project LIMIT 1'
+        );
+        $shiftCodeStmt->execute(['code' => $employeeCode, 'project' => $projectCode]);
+        $employeeShiftLabel = ShiftSchedule::normalizeShiftLabel((string) ($shiftCodeStmt->fetchColumn() ?: ''));
+
         $stmt = $pdo->prepare(
             'SELECT scan_time FROM attendance_scans
              WHERE employee_code = :code AND project_code = :project
@@ -57,6 +64,7 @@ final class AttendanceSessionBuilder
             $computed[] = self::computeSession($session['check_in'], $session['check_out'], $session['scan_count'], $config);
         }
         $computed = self::resolveAmbiguousShifts($computed, $config);
+        $computed = self::applyShiftSchedule($computed, $projectCode, $employeeShiftLabel, $config);
         $computed = array_map(static function (array $s): array {
             unset($s['ambiguous'], $s['check_in_dt'], $s['check_out_dt']);
             return $s;
@@ -250,6 +258,39 @@ final class AttendanceSessionBuilder
     private static function sanitizedNeighborCount(int $available): int
     {
         return min($available, 5);
+    }
+
+    /**
+     * ถ้า HR ตั้งค่ากะประจำเดือนไว้ (ShiftSchedule) ให้ยึดตามนั้นเสมอ (authoritative)
+     * เพราะทีมงานตกลงกันว่าค่านี้ตายตัว ไม่ต้องเดาจากข้อมูลสแกนอีกเมื่อมีการตั้งค่าไว้แล้ว
+     *
+     * @param array<int, array<string, mixed>> $sessions
+     * @return array<int, array<string, mixed>>
+     */
+    private static function applyShiftSchedule(array $sessions, string $projectCode, ?string $employeeShiftLabel, array $config): array
+    {
+        if ($employeeShiftLabel === null) {
+            return $sessions;
+        }
+
+        foreach ($sessions as $i => $session) {
+            $scheduledShift = ShiftSchedule::resolveShiftType($projectCode, (string) $session['work_date'], $employeeShiftLabel);
+            if ($scheduledShift === null || $scheduledShift === $session['shift_type']) {
+                continue;
+            }
+
+            $rebuilt = self::buildSessionForShiftType(
+                $session['check_in_dt'],
+                $session['check_out_dt'],
+                (int) $session['scan_count'],
+                $scheduledShift,
+                (bool) $session['incomplete_flag'],
+                $config
+            );
+            $sessions[$i] = $rebuilt + ['ambiguous' => false, 'check_in_dt' => $session['check_in_dt'], 'check_out_dt' => $session['check_out_dt']];
+        }
+
+        return $sessions;
     }
 
     /**

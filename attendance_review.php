@@ -35,6 +35,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'recom
     $recomputeMessage = "คำนวณกะ/OT ใหม่ให้พนักงาน " . count($employeeCodes) . " คน ({$sessionCount} กะ) เรียบร้อยแล้ว";
 }
 
+$shiftScheduleMessage = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_shift_schedule') {
+    Csrf::requireValid();
+
+    $scheduleShift = (string) ($_POST['first_week_day_shift'] ?? '');
+    if (!in_array($scheduleShift, ShiftSchedule::SHIFTS, true)) {
+        $shiftScheduleMessage = ['type' => 'error', 'text' => 'กรุณาเลือกกะให้ถูกต้อง (A หรือ B)'];
+    } else {
+        ShiftSchedule::saveSetting($projectCode, $month, $scheduleShift, Auth::currentUserId());
+
+        // ตั้งค่าเปลี่ยนแล้วต้องคำนวณกะ/OT ของเดือนนี้ใหม่ทันที ไม่งั้นข้อมูลเก่าจะยังค้างอยู่
+        $codesStmt = $pdo->prepare('SELECT DISTINCT employee_code FROM attendance_scans WHERE project_code = :project');
+        $codesStmt->execute(['project' => $projectCode]);
+        $employeeCodes = array_column($codesStmt->fetchAll(), 'employee_code');
+        AttendanceSessionBuilder::rebuildForEmployees($employeeCodes, $projectCode);
+
+        $shiftScheduleMessage = ['type' => 'success', 'text' => "บันทึกกะประจำเดือน {$month} เรียบร้อยแล้ว และคำนวณ OT ใหม่ให้แล้ว"];
+    }
+}
+
+$currentShiftSchedule = ShiftSchedule::getSetting($projectCode, $month);
+
 $hasSortOrderStmt = $pdo->query("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME = 'employees'
@@ -132,6 +154,40 @@ require __DIR__ . '/partials/header.php';
             <strong><?= count($employees) ?></strong>
         </div>
     </div>
+</div>
+
+<div class="card">
+    <h2 style="margin-top:0;">ตั้งค่ากะประจำเดือน (<?= h($monthLabel) ?>)</h2>
+    <p class="hint">
+        ระบุว่า "สัปดาห์แรกของเดือนนี้" (สัปดาห์ปฏิทิน จันทร์-อาทิตย์) กะ A หรือ B เข้าเช้า
+        สัปดาห์ถัดไปในเดือนเดียวกันระบบจะสลับ A/B ให้อัตโนมัติ แล้วนำไปจับคู่กับคอลัมน์ Shift ของพนักงานแต่ละคนในไฟล์ Manpower
+        ถ้าไม่ตั้งค่าไว้ ระบบจะเดากะจากรูปแบบเวลาสแกนจริงแทน
+    </p>
+    <?php if ($shiftScheduleMessage !== null): ?>
+        <div class="alert <?= $shiftScheduleMessage['type'] === 'error' ? 'alert-error' : 'alert-success' ?>">
+            <?= h($shiftScheduleMessage['text']) ?>
+        </div>
+    <?php endif; ?>
+    <?php if ($currentShiftSchedule !== null): ?>
+        <p>ค่าที่ตั้งไว้ตอนนี้: กะ <strong><?= h($currentShiftSchedule['first_week_day_shift']) ?></strong> เข้าเช้าในสัปดาห์แรกของเดือนนี้</p>
+    <?php else: ?>
+        <p class="hint">ยังไม่ได้ตั้งค่าเดือนนี้</p>
+    <?php endif; ?>
+    <form method="post" style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+        <?= Csrf::field() ?>
+        <input type="hidden" name="action" value="save_shift_schedule">
+        <input type="hidden" name="project" value="<?= h($projectCode) ?>">
+        <input type="hidden" name="month" value="<?= h($month) ?>">
+        <div>
+            <label for="first_week_day_shift">สัปดาห์แรกของเดือนนี้ กะเช้าคือ</label>
+            <select id="first_week_day_shift" name="first_week_day_shift">
+                <?php foreach (ShiftSchedule::SHIFTS as $shiftOption): ?>
+                    <option value="<?= h($shiftOption) ?>" <?= ($currentShiftSchedule['first_week_day_shift'] ?? '') === $shiftOption ? 'selected' : '' ?>>กะ <?= h($shiftOption) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <button type="submit">บันทึกและคำนวณ OT ใหม่</button>
+    </form>
 </div>
 
 <form method="get" class="card review-filters">
