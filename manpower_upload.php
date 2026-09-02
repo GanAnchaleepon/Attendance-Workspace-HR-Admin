@@ -69,15 +69,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'เกิดข้อผิดพลาดด้านความปลอดภัยของไฟล์ที่อัปโหลด';
             } else {
                 try {
-                    $sheetNames = XlsxReader::listSheetNames($combinedFile['tmp_name']);
-                    if (count($sheetNames) === 0) {
-                        $errors[] = "ไม่พบชีตในไฟล์ {$combinedFile['name']}";
+                    $sheets = XlsxReader::listSheets($combinedFile['tmp_name']);
+                    // ไฟล์จริงมักมีชีตซ่อนปะปนอยู่ (เทมเพลต/ชีตช่วยคำนวณ) จึงต้องดูเฉพาะชีตที่มองเห็นได้เท่านั้น
+                    $visibleSheets = array_filter($sheets, static fn (array $s): bool => !$s['hidden']);
+
+                    if (count($visibleSheets) === 0) {
+                        $errors[] = "ไม่พบชีตที่มองเห็นได้ในไฟล์ {$combinedFile['name']}";
                     } else {
                         // ชีตที่ชื่อมีคำว่า "qa" ถือเป็น Manpower QA ส่วนชีตอื่นที่เหลือถือเป็น Manpower หลัก
-                        // (ถ้าไม่มีชีตไหนชื่อมีคำว่า qa เลย จะยึดตามลำดับ: ชีต 1 = Manpower, ชีต 2 = QA)
+                        // (ถ้าไม่มีชีตไหนชื่อมีคำว่า qa เลย จะยึดตามลำดับ: ชีตที่มองเห็นได้ชีตแรก = Manpower, ชีตถัดไป = QA)
                         $qaIndex = null;
-                        foreach ($sheetNames as $idx => $name) {
-                            if (stripos($name, 'qa') !== false) {
+                        foreach ($visibleSheets as $idx => $sheet) {
+                            if (stripos($sheet['name'], 'qa') !== false) {
                                 $qaIndex = $idx;
                                 break;
                             }
@@ -86,21 +89,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $sheetAssignments = [];
                         if ($qaIndex !== null) {
                             $sheetAssignments['qa'] = $qaIndex;
-                            foreach ($sheetNames as $idx => $name) {
+                            foreach ($visibleSheets as $idx => $sheet) {
                                 if ($idx !== $qaIndex) {
                                     $sheetAssignments['manpower'] = $idx;
                                     break;
                                 }
                             }
                         } else {
-                            $sheetAssignments['manpower'] = 0;
-                            if (isset($sheetNames[1])) {
-                                $sheetAssignments['qa'] = 1;
+                            $visibleIndices = array_keys($visibleSheets);
+                            $sheetAssignments['manpower'] = $visibleIndices[0];
+                            if (isset($visibleIndices[1])) {
+                                $sheetAssignments['qa'] = $visibleIndices[1];
                             }
                         }
 
                         foreach ($sheetAssignments as $listType => $idx) {
-                            $sourceLabel = "{$combinedFile['name']} (ชีต: {$sheetNames[$idx]})";
+                            $sourceLabel = "{$combinedFile['name']} (ชีต: {$sheets[$idx]['name']})";
                             try {
                                 $rows = XlsxReader::readRows($combinedFile['tmp_name'], $idx);
                                 $result = ManpowerImporter::importFromRows(
@@ -112,7 +116,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 );
                                 $results[] = ['list_type' => $listType, 'file_name' => $sourceLabel] + $result;
                             } catch (Throwable $e) {
-                                $errors[] = "ประมวลผลชีต {$sheetNames[$idx]} ไม่สำเร็จ: " . $e->getMessage();
+                                $errors[] = "ประมวลผลชีต {$sheets[$idx]['name']} ไม่สำเร็จ: " . $e->getMessage();
                             }
                         }
                     }

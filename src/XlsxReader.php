@@ -15,6 +15,17 @@ final class XlsxReader
      */
     public static function listSheetNames(string $filePath): array
     {
+        return array_column(self::listSheets($filePath), 'name');
+    }
+
+    /**
+     * คืนชื่อ + สถานะซ่อนของชีตทั้งหมด เรียงตามลำดับในสมุดงาน (index ตรงกับ $sheetIndex ของ readRows)
+     * ไฟล์ Excel จริงมักมีชีตที่ถูกซ่อนไว้ (state="hidden"/"veryHidden") ปะปนกับชีตที่ใช้งานจริง
+     *
+     * @return array<int, array{name: string, hidden: bool}>
+     */
+    public static function listSheets(string $filePath): array
+    {
         $zip = self::openZip($filePath);
         $workbookXml = $zip->getFromName('xl/workbook.xml');
         $zip->close();
@@ -28,11 +39,15 @@ final class XlsxReader
             return [];
         }
 
-        $names = [];
+        $sheets = [];
         foreach ($workbook->sheets->sheet as $sheet) {
-            $names[] = (string) $sheet['name'];
+            $state = (string) $sheet['state'];
+            $sheets[] = [
+                'name' => (string) $sheet['name'],
+                'hidden' => $state === 'hidden' || $state === 'veryHidden',
+            ];
         }
-        return $names;
+        return $sheets;
     }
 
     /**
