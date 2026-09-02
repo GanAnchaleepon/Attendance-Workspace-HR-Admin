@@ -1,0 +1,20 @@
+Options -Indexes
+ServerSignature Off
+
+<IfModule mod_php.c>
+    php_flag display_errors Off
+    php_value upload_max_filesize 60M
+    php_value post_max_size 70M
+    php_value max_execution_time 600
+    php_value max_input_time 600
+</IfModule>
+
+<FilesMatch "\.(ini|log|sh|sql)$">
+    Require all denied
+</FilesMatch>
+
+# ป้องกันไฟล์คอนฟิก/เอกสารที่ไม่ควรเข้าถึงผ่านเว็บโดยตรง
+# (โฟลเดอร์ src/ และ sql/ มี .htaccess ของตัวเองที่ deny all อยู่แล้ว)
+<FilesMatch "^(config\.php|config\.example\.php|README\.md|schema\.sql)$">
+    Require all denied
+</FilesMatch>
