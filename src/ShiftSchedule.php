@@ -122,7 +122,7 @@ final class ShiftSchedule
     private static function dayShiftForWeek(string $workDate, string $firstWeekDayShift): string
     {
         $monthStart = substr($workDate, 0, 7) . '-01';
-        $mondayOfWeek1 = self::mondayOf($monthStart);
+        $mondayOfWeek1 = self::firstWeekMonday($monthStart);
         $mondayOfTargetWeek = self::mondayOf($workDate);
 
         $weeksDiff = (int) round((strtotime($mondayOfTargetWeek) - strtotime($mondayOfWeek1)) / (7 * 86400));
@@ -132,6 +132,20 @@ final class ShiftSchedule
             return $firstWeekDayShift;
         }
         return $firstWeekDayShift === 'A' ? 'B' : 'A';
+    }
+
+    /**
+     * คืนวันจันทร์ของ "สัปดาห์แรกของเดือน" ตามที่ HR เข้าใจ คือสัปดาห์ปฏิทินแรกที่วันจันทร์ตกอยู่ในเดือนนี้
+     * (ถ้าวันที่ 1 ไม่ใช่วันจันทร์ ให้ข้ามไปสัปดาห์ที่วันจันทร์ตกในเดือนนี้จริงๆ แทนสัปดาห์ก่อนหน้าที่ส่วนใหญ่อยู่เดือนก่อน)
+     */
+    private static function firstWeekMonday(string $monthStart): string
+    {
+        $ts = strtotime($monthStart);
+        $isoWeekday = (int) date('N', $ts); // 1=จันทร์ ... 7=อาทิตย์
+        if ($isoWeekday === 1) {
+            return date('Y-m-d', $ts);
+        }
+        return date('Y-m-d', strtotime('+' . (8 - $isoWeekday) . ' days', $ts));
     }
 
     /** คืนวันที่ของวันจันทร์ในสัปดาห์ปฏิทินที่ครอบคลุมวันที่ระบุ (รูปแบบ Y-m-d) */
