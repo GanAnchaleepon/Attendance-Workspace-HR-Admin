@@ -353,9 +353,11 @@ final class XlsReader
     private static function readSst(string $stream, int $posAfterHeader, string $recData): array
     {
         $uniqueCount = self::readUInt32($recData, 4);
-        $buffer = substr($recData, 8);
 
-        // ถ้าข้อมูล SST ยาวเกิน record เดียว ตัวไฟล์จะต่อด้วย CONTINUE record (type 0x003C) ทันที ต้องอ่านรวมเข้ามา
+        // ถ้าข้อมูล SST ยาวเกิน record เดียว ตัวไฟล์จะต่อด้วย CONTINUE record (type 0x003C) ทันที
+        // เก็บเป็น "chunk" แยกกันไว้ (ห้ามต่อ buffer ตรง ๆ) เพราะสตริงที่ถูกตัดคาบเกี่ยว CONTINUE
+        // ต้องอ่าน flag byte ใหม่ (compressed/uncompressed) ที่ต้น chunk ถัดไปเสมอตามสเปก BIFF8
+        $chunks = [substr($recData, 8)];
         $len = strlen($stream);
         $pos = $posAfterHeader;
         while ($pos + 4 <= $len) {
@@ -364,42 +366,114 @@ final class XlsReader
                 break;
             }
             $peekLen = self::readUInt16($stream, $pos + 2);
-            $buffer .= substr($stream, $pos + 4, $peekLen);
+            $chunks[] = substr($stream, $pos + 4, $peekLen);
             $pos += 4 + $peekLen;
         }
 
+        $cursor = self::newChunkCursor($chunks);
         $strings = [];
-        $offset = 0;
-        $bufLen = strlen($buffer);
-        for ($i = 0; $i < $uniqueCount && $offset < $bufLen; $i++) {
-            $charCount = self::readUInt16($buffer, $offset);
-            $flags = ord($buffer[$offset + 2] ?? "\0");
-            $offset += 3;
+        for ($i = 0; $i < $uniqueCount && !self::chunkCursorEof($cursor); $i++) {
+            $charCount = self::readUInt16(self::chunkCursorRead($cursor, 2), 0);
+            $flags = ord(self::chunkCursorRead($cursor, 1));
             $isWide = ($flags & 0x01) !== 0;
             $hasRichText = ($flags & 0x08) !== 0;
             $hasPhonetic = ($flags & 0x04) !== 0;
 
             $richCount = 0;
-            $phoneticSize = 0;
             if ($hasRichText) {
-                $richCount = self::readUInt16($buffer, $offset);
-                $offset += 2;
+                $richCount = self::readUInt16(self::chunkCursorRead($cursor, 2), 0);
             }
+            $phoneticSize = 0;
             if ($hasPhonetic) {
-                $phoneticSize = self::readUInt32($buffer, $offset);
-                $offset += 4;
+                $phoneticSize = self::readUInt32(self::chunkCursorRead($cursor, 4), 0);
             }
 
-            $byteLen = $isWide ? $charCount * 2 : $charCount;
-            $raw = substr($buffer, $offset, $byteLen);
-            $strings[] = $isWide
-                ? mb_convert_encoding($raw, 'UTF-8', 'UTF-16LE')
-                : mb_convert_encoding($raw, 'UTF-8', 'ISO-8859-1');
-            $offset += $byteLen + ($richCount * 4) + $phoneticSize;
+            $strings[] = self::readSstCharacters($cursor, $charCount, $isWide);
+
+            if ($richCount > 0) {
+                self::chunkCursorRead($cursor, $richCount * 4);
+            }
+            if ($phoneticSize > 0) {
+                self::chunkCursorRead($cursor, $phoneticSize);
+            }
         }
 
         return $strings;
     }
+
+    /**
+     * อ่านตัวอักษรของสตริง SST หนึ่งตัว โดยรองรับกรณีที่ตัวอักษรถูกตัดคาบเกี่ยวหลาย CONTINUE chunk
+     * เมื่อข้าม chunk ต้องอ่าน flag byte ใหม่เสมอ (การบีบอัดของส่วนที่เหลืออาจเปลี่ยนไปจากเดิม)
+     *
+     * @param array{chunks: array<int,string>, index:int, offset:int} $cursor
+     */
+    private static function readSstCharacters(array &$cursor, int $charCount, bool $wide): string
+    {
+        $text = '';
+        $remaining = $charCount;
+
+        while ($remaining > 0 && !self::chunkCursorEof($cursor)) {
+            $chunk = $cursor['chunks'][$cursor['index']];
+            $availBytes = strlen($chunk) - $cursor['offset'];
+            $bytesPerChar = $wide ? 2 : 1;
+            $availChars = intdiv($availBytes, $bytesPerChar);
+            $takeChars = min($availChars, $remaining);
+            $takeBytes = $takeChars * $bytesPerChar;
+
+            $raw = self::chunkCursorRead($cursor, $takeBytes);
+            $text .= $wide
+                ? mb_convert_encoding($raw, 'UTF-8', 'UTF-16LE')
+                : mb_convert_encoding($raw, 'UTF-8', 'ISO-8859-1');
+            $remaining -= $takeChars;
+
+            if ($remaining > 0 && !self::chunkCursorEof($cursor)) {
+                // ข้าม chunk ใหม่: ต้องอ่าน flag byte ของส่วนที่เหลือใหม่เสมอตามสเปก BIFF8
+                $flags = ord(self::chunkCursorRead($cursor, 1));
+                $wide = ($flags & 0x01) !== 0;
+            }
+        }
+
+        return $text;
+    }
+
+    /**
+     * @param array<int, string> $chunks
+     * @return array{chunks: array<int,string>, index:int, offset:int}
+     */
+    private static function newChunkCursor(array $chunks): array
+    {
+        return ['chunks' => array_values($chunks), 'index' => 0, 'offset' => 0];
+    }
+
+    /** @param array{chunks: array<int,string>, index:int, offset:int} $cursor */
+    private static function chunkCursorEof(array $cursor): bool
+    {
+        return $cursor['index'] >= count($cursor['chunks']);
+    }
+
+    /**
+     * อ่าน $n ไบต์จากลำดับ chunk ปัจจุบัน ข้าม chunk ถัดไปอัตโนมัติถ้าไบต์ในชิ้นปัจจุบันไม่พอ
+     *
+     * @param array{chunks: array<int,string>, index:int, offset:int} $cursor
+     */
+    private static function chunkCursorRead(array &$cursor, int $n): string
+    {
+        $result = '';
+        while ($n > 0 && !self::chunkCursorEof($cursor)) {
+            $chunk = $cursor['chunks'][$cursor['index']];
+            $avail = strlen($chunk) - $cursor['offset'];
+            $take = min($avail, $n);
+            $result .= substr($chunk, $cursor['offset'], $take);
+            $cursor['offset'] += $take;
+            $n -= $take;
+            if ($cursor['offset'] >= strlen($chunk)) {
+                $cursor['index']++;
+                $cursor['offset'] = 0;
+            }
+        }
+        return $result;
+    }
+
 
     /**
      * @return array{0:int,1:int,2:string}
