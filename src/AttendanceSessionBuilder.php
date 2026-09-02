@@ -13,9 +13,10 @@ declare(strict_types=1);
  * เป็นการหมุนเวียนที่ไม่มีตารางแน่นอนในระบบนี้ และอาจมีการสลับคนรายบุคคลได้ทุกเมื่อ)
  *
  * เมื่อวันไหนเดากะแบบวันเดียวไม่มั่นใจ (เวลาเข้างานก้ำกึ่งระหว่างกะเช้า/กะดึก หรือมีสแกนแค่ครั้งเดียว)
- * ระบบจะดูรูปแบบการสแกนของวันใกล้เคียงมาโหวตเสียงข้างมากแทน (ดู resolveAmbiguousShifts)
- * แต่ถ้า HR ตั้งค่ากะประจำเดือนไว้ผ่านหน้า attendance_review.php (ดู src/ShiftSchedule.php) จะยึดตามนั้น
- * เสมอโดยไม่เดา (authoritative) เพราะกะของพนักงานแต่ละคนที่ประกาศมาแล้วถือเป็นค่าตายตัว
+ * ระบบจะลองใช้ตารางกะที่ HR ตั้งไว้ผ่านหน้า attendance_review.php ก่อน (ดู src/ShiftSchedule.php)
+ * ถ้าไม่มีตั้งค่าไว้ จึงค่อยดูรูปแบบการสแกนของวันใกล้เคียงมาโหวตเสียงข้างมากแทน (resolveAmbiguousShifts)
+ * ทั้งสองกรณีนี้ใช้เฉพาะวันที่ข้อมูลสแกนเองไม่ชัดเจนเท่านั้น — วันที่ข้อมูลชัดเจนอยู่แล้วจะไม่ถูกบังคับทับ
+ * แม้มีตารางกะตั้งไว้ก็ตาม เพื่อกันกรณีมีการสลับคนจริงที่ตารางกะยังไม่ได้อัปเดตตาม
  * ทั้งนี้ทุกหน้าที่แสดงกะ/OT (attendance_review.php, print_ot_form.php) ใช้ค่าที่คำนวณไว้ในตารางนี้
  * โดยตรง ไม่มีการคำนวณกะซ้ำที่หน้าอื่นอีก (single source of truth)
  */
@@ -63,8 +64,7 @@ final class AttendanceSessionBuilder
         foreach ($sessions as $session) {
             $computed[] = self::computeSession($session['check_in'], $session['check_out'], $session['scan_count'], $config);
         }
-        $computed = self::resolveAmbiguousShifts($computed, $config);
-        $computed = self::applyShiftSchedule($computed, $projectCode, $employeeShiftLabel, $config);
+        $computed = self::resolveAmbiguousShifts($computed, $config, $projectCode, $employeeShiftLabel);
         $computed = array_map(static function (array $s): array {
             unset($s['ambiguous'], $s['check_in_dt'], $s['check_out_dt']);
             return $s;
@@ -196,16 +196,18 @@ final class AttendanceSessionBuilder
     }
 
     /**
-     * เมื่อวันไหนเดากะแบบวันเดียวไม่มั่นใจ (ก้ำกึ่ง หรือมีสแกนแค่ครั้งเดียว) ให้ดูรูปแบบการสแกนจริง
-     * ของ "วันใกล้เคียง" ที่ไม่ก้ำกึ่ง (ใช้ 5 วันที่ใกล้ที่สุดตามปฏิทิน) มาโหวตเสียงข้างมากแทน
-     * วิธีนี้ปรับตามข้อมูลจริงเสมอ ไม่ต้องตั้งค่ารอบหมุนกะ/ยกเว้นรายบุคคลในโค้ดอีกต่อไป
-     * (พนักงานสลับกะฉุกเฉินเป็นรายวันก็จะถูกจับได้ถูกต้อง เพราะเวลาสแกนของวันนั้นเองจะฟ้องอยู่แล้ว
-     * ส่วนวันที่ข้อมูลก้ำกึ่ง/ไม่ครบ ค่อยอาศัยวันใกล้เคียงช่วยตัดสิน)
+     * เมื่อวันไหนเดากะแบบวันเดียวไม่มั่นใจ (ก้ำกึ่ง หรือมีสแกนแค่ครั้งเดียว) เท่านั้นที่จะมาลองอีก 2 ชั้น:
+     * 1) ถ้า HR ตั้งค่ากะประจำเดือนไว้ (ShiftSchedule) และพนักงานมี shift_code ที่อ่านออก ให้ยึดตามนั้น
+     * 2) ถ้าไม่มีการตั้งค่า ให้ดูรูปแบบการสแกนของ "วันใกล้เคียง" ที่ไม่ก้ำกึ่ง (5 วันที่ใกล้ที่สุด) มาโหวตแทน
+     *
+     * หมายเหตุสำคัญ: วันที่ข้อมูลสแกนเองชัดเจนอยู่แล้ว (ไม่ก้ำกึ่ง) จะไม่ถูกบังคับทับด้วยตารางกะ แม้ตั้งค่าไว้ก็ตาม
+     * เพราะถ้าข้อมูลจริงขัดกับตารางกะ (เช่น มีการสลับคนรายบุคคลที่ไม่ได้อัปเดตตารางกะ) การบังคับทับจะทำให้
+     * expected_start/end ผิดเพี้ยนจนคำนวณ OT ออกมาไร้สาระ (เช่น ได้ OT หลายสิบชั่วโมง) ข้อมูลจริงจึงควรชนะเสมอ
      *
      * @param array<int, array<string, mixed>> $sessions
      * @return array<int, array<string, mixed>>
      */
-    private static function resolveAmbiguousShifts(array $sessions, array $config): array
+    private static function resolveAmbiguousShifts(array $sessions, array $config, string $projectCode, ?string $employeeShiftLabel): array
     {
         $workDateTs = array_map(
             static fn (array $s): int => (int) strtotime((string) $s['work_date']),
@@ -217,34 +219,40 @@ final class AttendanceSessionBuilder
                 continue;
             }
 
-            $candidates = [];
-            foreach ($sessions as $j => $other) {
-                if ($i === $j || $other['ambiguous']) {
-                    continue;
+            $resolvedShift = $employeeShiftLabel !== null
+                ? ShiftSchedule::resolveShiftType($projectCode, (string) $session['work_date'], $employeeShiftLabel)
+                : null;
+
+            if ($resolvedShift === null) {
+                $candidates = [];
+                foreach ($sessions as $j => $other) {
+                    if ($i === $j || $other['ambiguous']) {
+                        continue;
+                    }
+                    $dayDiff = abs($workDateTs[$j] - $workDateTs[$i]);
+                    $candidates[] = [$dayDiff, (string) $other['shift_type']];
                 }
-                $dayDiff = abs($workDateTs[$j] - $workDateTs[$i]);
-                $candidates[] = [$dayDiff, (string) $other['shift_type']];
+
+                if (count($candidates) === 0) {
+                    continue; // ไม่มีวันใกล้เคียงให้เทียบ ใช้ผลเดาแบบวันเดียวเดิมต่อไป
+                }
+
+                usort($candidates, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
+                $nearest = array_slice($candidates, 0, self::sanitizedNeighborCount(count($candidates)));
+
+                $votes = ['day' => 0, 'night' => 0];
+                foreach ($nearest as [, $type]) {
+                    $votes[$type]++;
+                }
+                $resolvedShift = $votes['day'] >= $votes['night'] ? 'day' : 'night';
             }
 
-            if (count($candidates) === 0) {
-                continue; // ไม่มีวันใกล้เคียงให้เทียบ ใช้ผลเดาแบบวันเดียวเดิมต่อไป
-            }
-
-            usort($candidates, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
-            $nearest = array_slice($candidates, 0, self::sanitizedNeighborCount(count($candidates)));
-
-            $votes = ['day' => 0, 'night' => 0];
-            foreach ($nearest as [, $type]) {
-                $votes[$type]++;
-            }
-            $majorityShift = $votes['day'] >= $votes['night'] ? 'day' : 'night';
-
-            if ($majorityShift !== $session['shift_type']) {
+            if ($resolvedShift !== $session['shift_type']) {
                 $rebuilt = self::buildSessionForShiftType(
                     $session['check_in_dt'],
                     $session['check_out_dt'],
                     (int) $session['scan_count'],
-                    $majorityShift,
+                    $resolvedShift,
                     (bool) $session['incomplete_flag'],
                     $config
                 );
@@ -258,39 +266,6 @@ final class AttendanceSessionBuilder
     private static function sanitizedNeighborCount(int $available): int
     {
         return min($available, 5);
-    }
-
-    /**
-     * ถ้า HR ตั้งค่ากะประจำเดือนไว้ (ShiftSchedule) ให้ยึดตามนั้นเสมอ (authoritative)
-     * เพราะทีมงานตกลงกันว่าค่านี้ตายตัว ไม่ต้องเดาจากข้อมูลสแกนอีกเมื่อมีการตั้งค่าไว้แล้ว
-     *
-     * @param array<int, array<string, mixed>> $sessions
-     * @return array<int, array<string, mixed>>
-     */
-    private static function applyShiftSchedule(array $sessions, string $projectCode, ?string $employeeShiftLabel, array $config): array
-    {
-        if ($employeeShiftLabel === null) {
-            return $sessions;
-        }
-
-        foreach ($sessions as $i => $session) {
-            $scheduledShift = ShiftSchedule::resolveShiftType($projectCode, (string) $session['work_date'], $employeeShiftLabel);
-            if ($scheduledShift === null || $scheduledShift === $session['shift_type']) {
-                continue;
-            }
-
-            $rebuilt = self::buildSessionForShiftType(
-                $session['check_in_dt'],
-                $session['check_out_dt'],
-                (int) $session['scan_count'],
-                $scheduledShift,
-                (bool) $session['incomplete_flag'],
-                $config
-            );
-            $sessions[$i] = $rebuilt + ['ambiguous' => false, 'check_in_dt' => $session['check_in_dt'], 'check_out_dt' => $session['check_out_dt']];
-        }
-
-        return $sessions;
     }
 
     /**
@@ -328,8 +303,10 @@ final class AttendanceSessionBuilder
 
             // OT ก่อนเวลาเริ่มกะ (เช่น กะดึกสแกนเข้า 20:00 แต่กะเริ่ม 22:30)
             $preShiftMinutes = max(0.0, ($expectedStart->getTimestamp() - $checkIn->getTimestamp()) / 60);
-            // ช่วงมาก่อนเวลาเล็กน้อยที่ไม่ถือเป็น OT
-            $preShiftOtMinutes = max(0.0, $preShiftMinutes - $preShiftNonOt);
+            // มาก่อนเวลาเกินกว่าช่วงผ่อนผัน (เช่น กะดึกมาก่อน 20:00 = มาก่อน "ช่วงยอมรับ" 150 นาที)
+            // ถือว่ามาทำงานล่วงเวลาจริง จ่าย OT เต็มช่วงผ่อนผันนั้นคงที่ (ไม่ใช่ตามจำนวนนาทีที่มาก่อนจริง)
+            // ถ้ามาภายในช่วงผ่อนผัน (เช่น 20:00-22:30) ถือเป็นมาก่อนเวลาปกติ ไม่นับ OT เลย
+            $preShiftOtMinutes = $preShiftMinutes > $preShiftNonOt ? $preShiftNonOt : 0.0;
             // OT หลังเลิกกะ (เช่น กะเช้าเลิก 17:30 แต่สแกนออก 20:00)
             $postShiftMinutes = max(0.0, ($checkOut->getTimestamp() - $expectedEnd->getTimestamp()) / 60);
 
