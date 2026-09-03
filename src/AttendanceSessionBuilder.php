@@ -23,6 +23,12 @@ declare(strict_types=1);
 final class AttendanceSessionBuilder
 {
     /**
+     * ช่วงเวลาสั้นสุดที่ถือว่าเป็น "กะทำงานจริง" ได้ ถ้าสแกนแรก-สุดท้ายห่างกันน้อยกว่านี้
+     * ถือว่าเป็นการกดเครื่องซ้ำครั้งเดียว (เครื่องสแกนนิ้วมักบันทึกซ้ำห่างกันไม่กี่วินาที) ไม่ใช่เข้า-ออกจริง
+     */
+    private const MIN_REAL_SESSION_MINUTES = 60;
+
+    /**
      * สร้าง/อัปเดต session ใหม่ทั้งหมดของพนักงานที่ระบุ จากข้อมูลสแกนทั้งหมดที่มีอยู่
      *
      * @param string[] $employeeCodes
@@ -309,7 +315,7 @@ final class AttendanceSessionBuilder
             [$shiftType, $ambiguous] = self::classifyShiftFromCheckIn($checkIn, $config);
         }
 
-        $isIncomplete = $checkIn->getTimestamp() === $checkOut->getTimestamp();
+        $isIncomplete = ($checkOut->getTimestamp() - $checkIn->getTimestamp()) < self::MIN_REAL_SESSION_MINUTES * 60;
 
         $result = self::buildSessionForShiftType($checkIn, $checkOut, $scanCount, $shiftType, $isIncomplete, $config, $workDateOverride);
         $result['ambiguous'] = $ambiguous || ($forcedShiftType === null && $isIncomplete);
