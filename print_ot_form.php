@@ -163,10 +163,13 @@ $backQuery = http_build_query(['project' => $employee['project_code'], 'month' =
                 $debugRows[] = [
                     'date' => $dateStr,
                     'shift_type' => '-',
+                    'scan_count' => '-',
                     'check_in' => '-',
                     'check_out' => '-',
                     'expected_start' => '-',
                     'expected_end' => '-',
+                    'pre_minutes' => '-',
+                    'post_minutes' => '-',
                     'ot_final' => '-',
                     'note' => 'ไม่มีข้อมูลสแกน',
                 ];
@@ -200,13 +203,24 @@ $backQuery = http_build_query(['project' => $employee['project_code'], 'month' =
 
                 $sessionOtMinutes = (int) ($session['ot_minutes'] ?? 0);
 
+                // แยกส่วนที่มาก่อนเวลา/อยู่ต่หลังเลิกกะ เพื่อให้ตรวจทานได้ว่า OT มาจากไหน (เลขจากค่าที่เก็บไว้แล้ว ไม่ได้ตัดสินกะใหม่)
+                $preMinutes = '-';
+                $postMinutes = '-';
+                if (!$session['incomplete_flag'] && !empty($session['expected_start']) && !empty($session['expected_end'])) {
+                    $preMinutes = (string) max(0, (int) round((strtotime((string) $session['expected_start']) - strtotime((string) $session['check_in'])) / 60));
+                    $postMinutes = (string) max(0, (int) round((strtotime((string) $session['check_out']) - strtotime((string) $session['expected_end'])) / 60));
+                }
+
                 $debugRows[] = [
                     'date' => $dateStr,
                     'shift_type' => (string) ($session['shift_type'] ?? '-'),
-                    'check_in' => $inText,
-                    'check_out' => $outText,
+                    'scan_count' => (string) ((int) ($session['scan_count'] ?? 0)),
+                    'check_in' => date('H:i:s', strtotime((string) $session['check_in'])),
+                    'check_out' => date('H:i:s', strtotime((string) $session['check_out'])),
                     'expected_start' => !empty($session['expected_start']) ? date('H:i', strtotime((string) $session['expected_start'])) : '-',
                     'expected_end' => !empty($session['expected_end']) ? date('H:i', strtotime((string) $session['expected_end'])) : '-',
+                    'pre_minutes' => $preMinutes,
+                    'post_minutes' => $postMinutes,
                     'ot_final' => floor($sessionOtMinutes / 60) . ':' . str_pad((string) ($sessionOtMinutes % 60), 2, '0', STR_PAD_LEFT),
                     'note' => $note,
                 ];
@@ -254,7 +268,11 @@ $backQuery = http_build_query(['project' => $employee['project_code'], 'month' =
     <h3 style="margin-top:0; margin-bottom:8px;">Debug Shift Decision</h3>
     <div class="hint" style="margin-bottom:8px;">
         ค่าที่แสดงมาจาก attendance_sessions โดยตรง (คำนวณครั้งเดียวตอนนำเข้าไฟล์สแกน ที่ AttendanceSessionBuilder
-        ไม่มีการคำนวณซ้ำที่หน้านี้อีก) ใช้ตรวจว่าระบบตัดสินกะเช้า/กะดึกของแต่ละวันถูกหรือไม่ (กดปุ่มซ่อนเมื่อไม่ใช้งาน)
+        ไม่มีการคำนวณซ้ำที่หน้านี้อีก) ใช้ตรวจว่าระบบตัดสินกะเช้า/กะดึกและคำนวณ OT ของแต่ละวันถูกหรือไม่<br>
+        <strong>Scans</strong> = จำนวนครั้งที่สแกนในกะนั้น (ถ้าเป็น 1 หรือสแกนรัวติดกันไม่ถึง 1 ชม. จะถือว่าสแกนครั้งเดียว)<br>
+        <strong>ก่อนเข้า</strong> = สแกนเข้าก่อนเวลาเริ่มกะกี่นาที &nbsp;·&nbsp;
+        <strong>หลังเลิก</strong> = สแกนออกหลังเวลาเลิกกะกี่นาที &nbsp;·&nbsp;
+        <strong>OT Final</strong> = ผลรวมหลังหักช่วงผ่อนผันและปัดเป็นบล็อกละ 30 นาทีแล้ว
     </div>
     <div style="overflow:auto;">
         <table style="margin-top:0;">
@@ -262,10 +280,13 @@ $backQuery = http_build_query(['project' => $employee['project_code'], 'month' =
             <tr>
                 <th>Date</th>
                 <th>Shift</th>
+                <th>Scans</th>
                 <th>Check-in</th>
                 <th>Check-out</th>
                 <th>Expected Start</th>
                 <th>Expected End</th>
+                <th>ก่อนเข้า<br>(นาที)</th>
+                <th>หลังเลิก<br>(นาที)</th>
                 <th>OT Final</th>
                 <th>Note</th>
             </tr>
@@ -275,10 +296,13 @@ $backQuery = http_build_query(['project' => $employee['project_code'], 'month' =
                 <tr>
                     <td><?= h($row['date']) ?></td>
                     <td><?= h($row['shift_type']) ?></td>
+                    <td><?= h($row['scan_count']) ?></td>
                     <td><?= h($row['check_in']) ?></td>
                     <td><?= h($row['check_out']) ?></td>
                     <td><?= h($row['expected_start']) ?></td>
                     <td><?= h($row['expected_end']) ?></td>
+                    <td><?= h($row['pre_minutes']) ?></td>
+                    <td><?= h($row['post_minutes']) ?></td>
                     <td><?= h($row['ot_final']) ?></td>
                     <td><?= h($row['note']) ?></td>
                 </tr>

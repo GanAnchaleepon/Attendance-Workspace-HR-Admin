@@ -210,7 +210,8 @@ final class AttendanceSessionBuilder
 
     /**
      * หา "ช่องกะ" ที่เวลาสแกนนี้เข้าข่าย โดยดูกะของวันนั้นและวันก่อนหน้า (กะดึกคาบเกี่ยวข้ามคืน)
-     * กรอบของแต่ละกะ = เวลาเข้างาน -5 ชม. ถึง เวลาเลิกงาน +6 ชม. (เผื่อมาก่อน/อยู่ OT ต่อ)
+     * กรอบของแต่ละกะ = เวลาเข้างาน -5 ชม. ถึง เวลาเลิกงาน +8 ชม.
+     * (เผื่อมาก่อนเวลา และเผื่อ OT กระทันหันที่อาจลากยาวข้ามเที่ยงคืน โดยยังไม่ชนกับกรอบของกะถัดไป)
      *
      * @return array<int, array{key:string, date:string, shift:string, expected_start:int, expected_end:int}>
      */
@@ -227,7 +228,7 @@ final class AttendanceSessionBuilder
             }
 
             [$expectedStart, $expectedEnd] = self::expectedBounds($date, $shift, $config);
-            if ($scanTs >= $expectedStart - 5 * 3600 && $scanTs <= $expectedEnd + 6 * 3600) {
+            if ($scanTs >= $expectedStart - 5 * 3600 && $scanTs <= $expectedEnd + 8 * 3600) {
                 $candidates[] = [
                     'key' => $date . '|' . $shift,
                     'date' => $date,
